@@ -1,0 +1,5 @@
+## Append samples of your project ##
+resources:
+- api_v1_autoscaler.yaml
+- api_v1_inference.yaml
+#+kubebuilder:scaffold:manifestskustomizesamples
