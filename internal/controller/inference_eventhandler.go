@@ -84,11 +84,18 @@ func (h *InferenceEventHandler) Create(c context.Context, e event.CreateEvent, _
 							Env: []corev1.EnvVar{
 								{
 									Name:  "REDIS_HOST",
-									Value: "redis-master.redis.svc.cluster.local",
+									Value: RedisHost(),
 								},
 								{
-									Name:  "REDIS_PASSWORD",
-									Value: "1234",
+									Name: "REDIS_PASSWORD",
+									ValueFrom: &corev1.EnvVarSource{
+										SecretKeyRef: &corev1.SecretKeySelector{
+											LocalObjectReference: corev1.LocalObjectReference{
+												Name: RedisSecretName(),
+											},
+											Key: RedisSecretPasswordKey(),
+										},
+									},
 								},
 							},
 						},

@@ -75,9 +75,8 @@ type AutoscalerEventSource struct {
 
 func (s *AutoscalerEventSource) PollingRedis(ctx context.Context) error {
 	rdb := redis.NewClient(&redis.Options{
-		// Addr:     "redis-master.redis.svc.cluster.local:6379",
-		Addr:     "localhost:6379",
-		Password: "1234",
+		Addr:     RedisAddr(),
+		Password: RedisPassword(),
 	})
 
 	AllGPU := s.GetAllGPU(ctx)
