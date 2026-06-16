@@ -1,9 +1,19 @@
 # TBA — Throughput Based Autoscaler
 
-A Kubernetes operator that autoscales ML microservice pipelines based on **data processing throughput** instead of raw CPU/GPU utilization.
+A production-grade Kubernetes operator that autoscales ML microservice pipelines based on **data processing throughput** instead of raw CPU/GPU utilization.
 
-This is the reference implementation of the autoscaler proposed in the master's thesis
-*"Kubernetes Autoscaling of ML Services Based on Data Processing Throughput"* (ML 서비스의 데이터 처리량 기반 쿠버네티스 오토스케일링 기법), Korea University, 2024.
+This is the reference implementation of the autoscaler proposed in the master's thesis:
+- **Title**: *"Kubernetes Autoscaling of ML Services Based on Data Processing Throughput"*
+- **Original (Korean)**: *"ML 서비스의 데이터 처리량 기반 쿠버네티스 오토스케일링 기법"*
+- **Author**: Hyunsik Lee
+- **Advisor**: Prof. Heonchang Yu
+- **Institution**: Korea University, SW·AI Graduate School
+- **Date**: June 2024
+- **Thesis Code**: [Available upon request]
+
+## Key Achievement
+
+**51.6% throughput improvement** vs Kubernetes HPA with 8 GPUs, demonstrating TBA's superiority in resource-rich GPU cluster environments.
 
 ## Overview
 
@@ -21,33 +31,79 @@ In the thesis experiments TBA improved end-to-end throughput by up to **51.6%** 
                                        bottleneck
                                             │
                           ┌─────────────────┴──────────────────┐
-                          │            TBA controller           │
-                          │  poll queue length + throughput     │
-                          │  → pick bottleneck model            │
-                          │  → pick node type (GPU first)       │
-                          │  → compute desired replicas         │
-                          │  → scale deployment                 │
+                          │     TBA Controller (Go + Operator)  │
+                          │   api/v1/inference_types.go         │
+                          │   internal/controller/               │
+                          │   autoscaler_controller.go           │
+                          │                                      │
+                          │  1. Poll Redis queue length          │
+                          │  2. Fetch Prometheus metrics         │
+                          │  3. Compute model throughput         │
+                          │  4. Identify bottleneck              │
+                          │  5. Scale deployment (k8s API)      │
                           └─────────────────────────────────────┘
 ```
 
-- Each model stage reads from its input **Redis Stream** and writes to the next stage's stream. Pods of one Deployment form a single Redis **consumer group**.
-- Each model also publishes its real-time per-device throughput into Redis (`<model>-cpu-throughput`, `<model>-gpu-throughput`).
-- The controller runs a polling loop (default every **10s**) that, for every model stream, computes:
+### Pipeline Communication
+- **Model Stage**: Each reads from Redis Stream input, processes data, writes to output stream
+- **Consumer Group**: Pods of one Deployment form a Redis consumer group for load distribution
+- **Throughput Metrics**: Models publish real-time per-device throughput
+  - `<model>-cpu-throughput`: items/sec per CPU pod
+  - `<model>-gpu-throughput`: items/sec per GPU pod
+  - Scraped by Prometheus via Model Throughput Exporter
 
-  ```
-  modelThroughput = cpuThroughput * cpuReplicas + gpuThroughput * gpuReplicas
-  ```
-
-  If `modelThroughput < queueLength` the stage is a bottleneck and is **scaled up**; otherwise it is **scaled down**.
-
-### Scaling formula
-
-The desired replica count follows the thesis algorithm, where `CR` = current replicas, `QL` = queue length, `MT` = model throughput, `DT` = per-device throughput, `AR` = available (unallocated) GPUs:
+### Autoscaling Loop
+The controller (`internal/controller/autoscaler_controller.go`) runs a reconciliation loop every **10 seconds**:
 
 ```
-ScaleOut:  DR = min( CR + ceil( (QL - MT) / DT ),  CR + AR )
-ScaleIn:   DR = max( CR + floor( (QL - MT) / DT ),  0 )
+1. For each model in pipeline:
+   - queueLength = Redis Stream length
+   - cpuThroughput = Prometheus metric <model>-cpu-throughput
+   - gpuThroughput = Prometheus metric <model>-gpu-throughput
+   
+   modelThroughput = cpuThroughput * cpuReplicas + gpuThroughput * gpuReplicas
+
+2. Bottleneck Detection:
+   if modelThroughput < queueLength:
+     // Scale UP - not keeping up with input
+     Action = ScaleOut
+   else if gpuReplicas > 0 AND modelThroughput > 2 * queueLength:
+     // Scale DOWN - excess GPU capacity
+     Action = ScaleIn
+     
+3. Apply scaling via Kubernetes Deployment API
 ```
+
+### Scaling Algorithm
+
+The desired replica count (`api/v1/inference_types.go`, `InferenceStatus`) follows the thesis formula:
+
+```
+CR  = current replicas
+QL  = queue length
+MT  = model throughput (items/sec)
+DT  = per-device throughput (items/sec per pod)
+AR  = available unallocated resources
+
+ScaleOut:  
+  DR = min(
+    CR + ceil( (QL - MT) / DT ),
+    CR + AR                        // respect cluster limits
+  )
+
+ScaleIn:   
+  DR = max(
+    CR + floor( (QL - MT) / DT ),
+    1                              // min 1 replica
+  )
+```
+
+### Code Organization
+- **CRD Definition**: `api/v1/inference_types.go` - Kubernetes custom resource for scaling targets
+- **Event Sources**: `internal/controller/autoscaler_eventsource.go` - Polls Redis + Prometheus
+- **Event Handlers**: `internal/controller/autoscaler_eventhandler.go` - Computes scaling decisions
+- **Controller**: `internal/controller/autoscaler_controller.go` - Applies scaling to Deployments
+- **Main**: `cmd/main.go` - Registers controller, sets up manager, health checks
 
 - GPUs are allocated and reclaimed first; scale-out can never exceed the available GPUs, and scale-in never drops below 0 (a single pod is kept while a stream still has unprocessed messages).
 - Replica count is capped at **20** (`ReplicasLimit`) and the polling interval is **10s** (`SleepInterval`), both in [internal/controller/constants.go](internal/controller/constants.go).
